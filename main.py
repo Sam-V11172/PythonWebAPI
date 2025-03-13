@@ -7,7 +7,6 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from io import BytesIO
 import uvicorn
-from pyngrok import ngrok
 
 app = FastAPI()
 
@@ -55,8 +54,5 @@ async def healthcheck(file: UploadFile = File(...)):
         return {"table": table_result, "graph_image": img.getvalue().hex()}
     except Exception as e:
         return {"error": str(e)}
-
-ngrok_tunnel = ngrok.connect(8000)
-print(f"Public URL: {ngrok_tunnel.public_url}")
 
 uvicorn.run(app, host="0.0.0.0", port=8000)
