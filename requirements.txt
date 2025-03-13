@@ -4,3 +4,4 @@ networkx
 aiohttp
 pandas
 matplotlib
+python-multipart
