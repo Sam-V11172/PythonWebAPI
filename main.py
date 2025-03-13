@@ -40,7 +40,7 @@ def generate_table(health_status):
 
 # Visualize the DAG and encode the image in Base64
 def visualize_graph(graph, health_status):
-    plt.figure(figsize=(8, 6))
+    plt.figure(figsize=(12, 10))
     pos = nx.spring_layout(graph)
     colors = ["red" if health_status[node] == "Failed" else "green" for node in graph.nodes]
     nx.draw(graph, pos, with_labels=True, node_color=colors, edge_color="black", node_size=2000, font_size=10)
