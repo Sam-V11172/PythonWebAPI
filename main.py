@@ -1,123 +1,83 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Dict, List
+from fastapi import FastAPI, UploadFile, File
+from fastapi.responses import HTMLResponse, StreamingResponse
 import networkx as nx
-import aiohttp
 import asyncio
+import json
+import pandas as pd
 import matplotlib.pyplot as plt
-import io
-import uvicorn
-from fastapi.responses import StreamingResponse
 from io import BytesIO
 
-# Create a FastAPI web app
 app = FastAPI()
 
-# Pydantic model for input graph
-class GraphRequest(BaseModel):
-    graph: Dict[str, List[str]]
+# Simulated health check function
+async def check_health(component: str) -> str:
+    await asyncio.sleep(1)  # Simulating async check
+    return "Healthy" if hash(component) % 3 != 0 else "Failed"
 
+# Convert JSON structure into a DAG
+def parse_json_to_dag(json_data):
+    graph = nx.DiGraph()
+    for node, dependencies in json_data.items():
+        graph.add_node(node)
+        for dep in dependencies:
+            graph.add_edge(dep, node)
+    return graph
 
-# Function to simulate a health check (replace with actual health check logic)
-async def check_health(node: str, session: aiohttp.ClientSession):
-    try:
-        # Placeholder for making an async HTTP request (to an API, database, etc.)
-        # For now, we randomly simulate health check
-        health_url = f"https://api.example.com/health/{node}"
-        async with session.get(health_url) as response:
-            return node, response.status == 200
-    except Exception as e:
-        return node, False
+# Traverse DAG and check health asynchronously
+async def traverse_and_check_health(graph):
+    health_status = {}
+    tasks = {node: asyncio.create_task(check_health(node)) for node in nx.topological_sort(graph)}
+    for node in tasks:
+        health_status[node] = await tasks[node]
+    return health_status
 
+# Generate HTML table for the health status
+def generate_table_html(health_status):
+    table_html = "<table border='1' style='width:50%; border-collapse: collapse;'>"
+    table_html += "<tr><th>Component</th><th>Health</th></tr>"
+    for component, status in health_status.items():
+        color = "red" if status == "Failed" else "green"
+        table_html += f"<tr><td>{component}</td><td style='color:{color};'>{status}</td></tr>"
+    table_html += "</table>"
+    return table_html
 
-# Function to perform the BFS traversal and check health of components
-async def bfs_health_check(graph: dict):
-    results = {}
-    visited = set()
-    queue = list(graph.keys())  # Start from all components (root nodes)
+# Visualize the DAG with health status
+def visualize_graph(graph, health_status):
+    plt.figure(figsize=(8, 6))
+    pos = nx.spring_layout(graph)  # Positioning nodes
+    colors = ["red" if health_status[node] == "Failed" else "green" for node in graph.nodes]
     
-    async with aiohttp.ClientSession() as session:
-        while queue:
-            node = queue.pop(0)
-            if node not in visited:
-                visited.add(node)
-                health_status = await check_health(node, session)
-                results[health_status[0]] = health_status[1]
-                
-                # Add dependent nodes (downstream components) to the queue
-                if node in graph:
-                    for neighbor in graph[node]:
-                        queue.append(neighbor)
-
-    return results
-
-
-# Function to visualize the graph with health status
-def plot_graph(graph, health_results):
-    G = nx.DiGraph(graph)
-    node_colors = ['red' if not health_results.get(node, True) else 'green' for node in G.nodes()]
-    pos = nx.spring_layout(G)  # Layout for nodes
-    nx.draw(G, pos, with_labels=True, node_color=node_colors, font_weight='bold', node_size=3000)
-    plt.title("System Health Graph")
+    nx.draw(graph, pos, with_labels=True, node_color=colors, edge_color="black", node_size=2000, font_size=10)
     
-    # Save the plot to a BytesIO object instead of displaying it
-    image_stream = BytesIO()
-    plt.savefig(image_stream, format="PNG")
-    plt.close()
-    image_stream.seek(0)
-    return image_stream
+    img = BytesIO()
+    plt.savefig(img, format="png")
+    img.seek(0)
+    return img
 
-
-# Health check API endpoint
-@app.post("/check_health")
-async def check_system_health(data: GraphRequest):
+# API endpoint: Health Check (Returns HTML Table)
+@app.post("/healthcheck/", response_class=HTMLResponse)
+async def healthcheck(file: UploadFile = File(...)):
     try:
-        # Extract graph from the request
-        graph = data.graph
-        
-        # Perform BFS health check
-        health_results = await bfs_health_check(graph)
-        
-        # Visualize the graph with health status
-        image_stream = plot_graph(graph, health_results)
-        
-        # Prepare the health results table in a text-based format
-        health_table = "<table border='1'><tr><th>Component</th><th>Status</th></tr>"
-        for node, status in health_results.items():
-            status_str = "Healthy" if status else "Unhealthy"
-            health_table += f"<tr><td>{node}</td><td>{status_str}</td></tr>"
-        health_table += "</table>"
-
-        # Return the health results and overall system status
-        overall_status = "Healthy" if all(health_results.values()) else "Unhealthy"
-        
-        return {
-            "health_results": health_results,
-            "overall_status": overall_status,
-            "health_table": health_table,  # Return the HTML table
-            "graph_image_url": "/static/graph.png"
-        }
-
-# Endpoint to serve the generated graph image
-@app.get("/static/graph.png")
-async def get_graph_image():
-    try:
-        # Generate the graph visualization image
-        graph_image = plot_graph(sample_graph, {})  # Provide any sample graph
-        return StreamingResponse(graph_image, media_type="image/png")
+        json_data = json.loads(await file.read())
+        graph = parse_json_to_dag(json_data)
+        health_status = await traverse_and_check_health(graph)
+        table_result = generate_table_html(health_status)
+        return table_result
     except Exception as e:
-        raise HTTPException(status_code=500, detail="Failed to generate graph image")
+        return f"<h3>Error: {str(e)}</h3>"
 
-# Sample graph for testing purposes
-sample_graph = {
-    "A": ["B", "C"],
-    "B": ["D", "E"],
-    "C": ["F"],
-    "D": [],
-    "E": [],
-    "F": []
-}
+# API endpoint: Graph Visualization (Returns PNG Image)
+@app.post("/visualize/")
+async def visualize(file: UploadFile = File(...)):
+    try:
+        json_data = json.loads(await file.read())
+        graph = parse_json_to_dag(json_data)
+        health_status = await traverse_and_check_health(graph)
+        img = visualize_graph(graph, health_status)
+        return StreamingResponse(img, media_type="image/png")
+    except Exception as e:
+        return {"error": str(e)}
 
-# Start the FastAPI server
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
