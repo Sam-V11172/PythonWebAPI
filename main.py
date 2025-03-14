@@ -1,83 +1,100 @@
 from fastapi import FastAPI, UploadFile, File
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 import networkx as nx
 import asyncio
 import json
-import pandas as pd
 import matplotlib.pyplot as plt
+import uvicorn
 from io import BytesIO
 
 app = FastAPI()
 
 # Simulated health check function
-async def check_health(component: str) -> str:
-    await asyncio.sleep(1)  # Simulating async check
+async def perform_health_check(component: str) -> str:
+    await asyncio.sleep(1)  # Simulating async health check
     return "Healthy" if hash(component) % 3 != 0 else "Failed"
 
-# Convert JSON structure into a DAG
-def parse_json_to_dag(json_data):
-    graph = nx.DiGraph()
-    for node, dependencies in json_data.items():
-        graph.add_node(node)
+# Convert incoming JSON data into a Directed Acyclic Graph (DAG)
+def create_dag_from_json(data):
+    dag = nx.DiGraph()  # Initialize a directed graph
+    for component, dependencies in data.items():
+        dag.add_node(component)  # Add the node (component)
         for dep in dependencies:
-            graph.add_edge(dep, node)
-    return graph
+            dag.add_edge(dep, component)  # Add edges (dependencies) from parent to component
+    return dag
 
-# Traverse DAG and check health asynchronously
-async def traverse_and_check_health(graph):
-    health_status = {}
-    tasks = {node: asyncio.create_task(check_health(node)) for node in nx.topological_sort(graph)}
-    for node in tasks:
-        health_status[node] = await tasks[node]
-    return health_status
+# Depth First Search (DFS) to traverse the DAG and check health asynchronously
+async def dfs_check_and_evaluate(dag, component, status_map):
+    """ Recursively perform DFS traversal and evaluate health for each component. """
+    if component not in status_map:  # If the component hasn't been checked yet
+        for dependency in dag.neighbors(component):  # Traverse the dependencies (parents)
+            await dfs_check_and_evaluate(dag, dependency, status_map)
+        status_map[component] = await perform_health_check(component)  # Now check the health of the current component
 
-# Generate HTML table for the health status
-def generate_table_html(health_status):
-    table_html = "<table border='1' style='width:50%; border-collapse: collapse;'>"
-    table_html += "<tr><th>Component</th><th>Health</th></tr>"
-    for component, status in health_status.items():
-        color = "red" if status == "Failed" else "green"
-        table_html += f"<tr><td>{component}</td><td style='color:{color};'>{status}</td></tr>"
-    table_html += "</table>"
-    return table_html
+# Generate a simple text-based table for health status results
+def generate_status_table(status_map):
+    table = "Component     | Health\n"
+    table += "-" * 30 + "\n"
+    for component, status in status_map.items():
+        table += f"{component:<15} | {status}\n"
+    return table
 
-# Visualize the DAG with health status
-def visualize_graph(graph, health_status):
-    plt.figure(figsize=(8, 6))
-    pos = nx.spring_layout(graph)  # Positioning nodes
-    colors = ["red" if health_status[node] == "Failed" else "green" for node in graph.nodes]
+# Generate a visual representation of the DAG with health statuses
+def generate_dag_image(dag, status_map, random_seed=42):
+    plt.figure(figsize=(12, 10))
     
-    nx.draw(graph, pos, with_labels=True, node_color=colors, edge_color="black", node_size=2000, font_size=10)
+    # Use spring_layout with a fixed seed for a consistent layout across runs
+    layout = nx.spring_layout(dag, seed=random_seed)  # Position the nodes
     
-    img = BytesIO()
-    plt.savefig(img, format="png")
-    img.seek(0)
-    return img
+    # Color the nodes based on their health status (Green: Healthy, Red: Failed)
+    node_colors = ["red" if status_map[node] == "Failed" else "green" for node in dag.nodes]
+    
+    # Draw the graph
+    nx.draw(dag, layout, with_labels=True, node_color=node_colors, edge_color="black", node_size=2000, font_size=10)
+    
+    # Save the plot to a BytesIO stream and return
+    img_stream = BytesIO()
+    plt.savefig(img_stream, format="png")
+    img_stream.seek(0)
+    return img_stream
 
-# API endpoint: Health Check (Returns HTML Table)
-@app.post("/healthcheck/", response_class=HTMLResponse)
-async def healthcheck(file: UploadFile = File(...)):
+# Endpoint for Health Check (Returns a Plain Text Table)
+@app.post("/healthcheck/")
+async def health_check(file: UploadFile = File(...)):
     try:
-        json_data = json.loads(await file.read())
-        graph = parse_json_to_dag(json_data)
-        health_status = await traverse_and_check_health(graph)
-        table_result = generate_table_html(health_status)
-        return table_result
+        data = json.loads(await file.read())  # Parse the uploaded JSON file
+        dag = create_dag_from_json(data)  # Create a DAG from the JSON data
+        status_map = {}  # Dictionary to hold the health status of each component
+        
+        # Perform DFS to check health of all components
+        for component in dag.nodes:
+            if component not in status_map:  # Only check unvisited components
+                await dfs_check_and_evaluate(dag, component, status_map)
+        
+        status_table = generate_status_table(status_map)  # Generate the status table
+        return status_table  # Return the plain text health status table
+        
     except Exception as e:
-        return f"<h3>Error: {str(e)}</h3>"
+        return f"Error: {str(e)}"
 
-# API endpoint: Graph Visualization (Returns PNG Image)
-@app.post("/visualize/")
-async def visualize(file: UploadFile = File(...)):
+# Endpoint for Graph Visualization (Returns PNG Image)
+@app.post("/graph/")
+async def graph(file: UploadFile = File(...)):
     try:
-        json_data = json.loads(await file.read())
-        graph = parse_json_to_dag(json_data)
-        health_status = await traverse_and_check_health(graph)
-        img = visualize_graph(graph, health_status)
-        return StreamingResponse(img, media_type="image/png")
+        data = json.loads(await file.read())  # Parse the uploaded JSON file
+        dag = create_dag_from_json(data)  # Create a DAG from the JSON data
+        status_map = {}  # Dictionary to hold the health status of each component
+        
+        # Perform DFS to check health of all components
+        for component in dag.nodes:
+            if component not in status_map:  # Only check unvisited components
+                await dfs_check_and_evaluate(dag, component, status_map)
+        
+        img_stream = generate_dag_image(dag, status_map)  # Generate the DAG image with health status
+        return StreamingResponse(img_stream, media_type="image/png")  # Return the image as PNG
+        
     except Exception as e:
         return {"error": str(e)}
 
 if __name__ == "__main__":
-    import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
